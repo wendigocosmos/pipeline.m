@@ -1,0 +1,299 @@
+% Appendix H. CNN used to remove whole frame artefact images
+
+imds = imageDatastore('C:\Users\wendi\Documents\MATLAB\Noise_DNA\');
+goundtruth = readtable("Noise_DNAlabels.csv",'Delimiter', ',', 'HeaderLines', 0,...
+'ReadVariableNames', true);
+imds.Labels =  categorical(goundtruth.Status);
+
+% calculate the number of images in each category
+labelCount = countEachLabel(imds)
+
+% in order to specify the size of the images in the input layer, check the
+% size of the first image
+img = readimage(imds,1);
+size(img)
+
+% divide the data into training and testing sets where each category
+% contains 750 images
+numTrainFiles = 900;
+[imdsTrain,imdsTest] = splitEachLabel(imds,numTrainFiles,'randomize');
+
+% define cnn architecture
+layers = [
+   % using image size from line 21 and color channel for grayscale
+   imageInputLayer([250 250 1])
+  
+   % filter size 3x3 with 8 neurons(filters) where spatial output size is
+   % the same as the input size
+    convolution2dLayer(7,8,'Padding','same')
+   % normalize the activations and gradients to speed up network training
+    % and reduce sensitivity to network initialization
+    batchNormalizationLayer
+    % nonlinear activation function (rectified linear unit)
+    reluLayer
+   
+   % down sampling operation to reduce spatial size of the feature map and
+    % remove redundant spatial information. this layer will return the max
+    % values of rectangular regions of inputs, specified by the first
+    % argument followed by the 'Stride' name-value pair to specify the step%     % size
+    maxPooling2dLayer(2,'Stride',2)
+   
+     % increase in neurons
+     convolution2dLayer(7,16,'Padding','same')
+     batchNormalizationLayer
+     reluLayer
+    
+     maxPooling2dLayer(2,'Stride',2)
+   
+    % increase in neurons
+    convolution2dLayer(7,32,'Padding','same')
+    batchNormalizationLayer
+    reluLayer
+   
+    maxPooling2dLayer(2,'Stride',2)
+   
+   convolution2dLayer(7,64,'Padding','same')
+   batchNormalizationLayer
+   reluLayer
+  
+   maxPooling2dLayer(2,'Stride',2)
+  
+   convolution2dLayer(7,128,'Padding','same')
+   batchNormalizationLayer
+   reluLayer
+  
+  
+   % this layer is where the neurons connect to all the neurons in the
+   % proceeding layer. combines all the features learned by the
+   % previous layers to identify larger patterns. combines features to
+   % classify the images therefore the OutputSize is equal to the number
+   % of classes
+   fullyConnectedLayer(2)
+
+   % normalize the output of the fully connected layer
+   softmaxLayer
+
+   %  this layer uses the probabilities returned by the softmax function
+   %  for each input to assign the input to one of the mutually exclusive
+   %  classes and compute the loss
+   classificationLayer];
+
+% specify training options
+% use sgdm with InitialLearnRate 0.01, set max number of epochs to 4,
+% shuffle the data every epoch, monitor network accuracy during training
+% by specifying validation data and frequency. validation data is
+% not used to update the network weights. turn on the training progress
+% plot, and turn off the command window output
+options = trainingOptions('sgdm','InitialLearnRate',0.001,'MaxEpochs',30,...
+   'Shuffle','every-epoch','ValidationData',imdsTest,'ValidationFrequency',...
+   30,'Verbose',false,'Plots','training-progress');
+
+% train the network
+net = trainNetwork(imdsTrain,layers,options);
+% save the trained network
+DNALrgFiltnet = net;
+save DNALrgFiltnet
+
+% classify images and compute accuracy
+YPred = classify(net,imdsTest);
+YValidation = imdsTest.Labels;
+accuracy = sum(YPred == YValidation)/numel(YValidation)
+figure;
+confusionchart(YValidation,YPred)
+
+% Appendix I.  Script to train DnCNN
+
+% training a DnCNN to remove gaps in molecules and sharpen the
+% edges
+% access image datastore from folder
+imds = imageDatastore('C:\Users\local_jcreed\Desktop\Wendy\50_dataPrep_DNA\');
+
+% introduce poisson noise to images from the imds
+% dsTrainNoisy = transform(imds,@addNoise);
+
+% concatenate both the imds and the noisy imds
+% dsTrain = combine(dsTrainNoisy,imds);
+% dsTrain = transform(dsTrainNoisy,@commonPreprocessing);
+
+% create a new imds introducing a percentage of gaussian noise
+dnimds = denoisingImageDatastore(imds);
+% use layer structure from pretrained dnCNN to retrain using my data
+layers = dnCNNLayers;
+
+% defining variables for training
+maxEpochs = 30;
+initLearningRate = 0.1;
+l2reg = 0.0001;
+batchSize = 64;
+
+% set training options
+options = trainingOptions('sgdm', ...
+   'Momentum',0.9, ...
+   'InitialLearnRate',initLearningRate, ...
+   'LearnRateSchedule','piecewise', ...
+   'GradientThresholdMethod','absolute-value', ...
+   'GradientThreshold',0.005, ...
+   'L2Regularization',l2reg, ...
+   'MiniBatchSize',batchSize, ...
+   'MaxEpochs',maxEpochs, ...
+   'Plots','training-progress', ...
+   'Verbose',false);
+
+% train the network using poisson introduced noise imds
+% dnnetpoisson = trainNetwork(dnimds,layers,options);
+% save dnnetpoisson
+% save('dnnetpoisson','dnnetpoisson')
+
+
+% Appendix J.  Script to sharpen edges using the Prewitt method
+
+function [] = dataPrep(P,outpath,path,framefile)
+
+I = imread([path,framefile]);
+
+% convert the pixel values into nanometers
+[I_nm] = pix2nm(I,framefile,P);
+
+% threshold
+IT = I_nm > P.tcutoff;
+
+% remove objects from the border
+I_clear = imclearborder(IT,8);
+
+% fill in objects
+% SE = strel('disk',2,8);
+
+I_obj = I_nm;
+IT_not = ~I_clear;    % inverse of IT
+I_obj(IT_not) = 0;   % make all pixels that aren't part of objects = 0
+
+% isolate the remaining objects left in the image
+cc = bwconncomp(I_clear,8);
+particleAreaS = regionprops(I_clear, 'Area');
+particleArea = [particleAreaS.Area];
+boolParticleKeep = particleArea > P.areacutoff;
+
+if isempty(particleArea)
+   return
+end
+
+pxIdx = cc.PixelIdxList;
+pxIdxFilt = pxIdx(boolParticleKeep);
+if isempty(pxIdxFilt)
+   return
+end
+
+[threshIM] = thresh(pxIdxFilt,I,I_obj);
+% applying edges over image
+edgethresh = edge(threshIM,'Prewitt',.049);
+
+threshmask = imoverlay(threshIM,edgethresh,'white');
+graymask = rgb2gray(threshmask);
+threshfinal = im2uint16(graymask);
+
+% assigning pixel values to the false background
+falsethresh = threshfinal == false;
+threshfinal(falsethresh) = 16000;
+dest = sprintf('%s_%s.tiff',...
+outpath,framefile);
+imwrite(threshfinal,dest)
+% imwrite(threshIM,dest)
+end
+
+
+% Appendix K.  Script for the Yolodetector
+
+% Truth = gTruth.LabelData;
+[imds,bxds] = objectDetectorTrainingData(gTruth);
+
+numAnchors = 5;
+anchorBoxes = estimateAnchorBoxes(bxds,numAnchors);
+inputImageSize = [1000,1000,3];
+numClasses = 1;
+network = resnet50();
+featureLayer = 'activation_49_relu';
+lgraph = yolov2Layers(inputImageSize,numClasses,anchorBoxes,network, featureLayer)
+
+% augimds = augmentedImageDatastore([1000 1000 3],imds,"ColorPreprocessing","gray2rgb");
+% augimds = augmentedImageDatastore([1000 1000 3],imds);
+% cds = combine(augimds,bxds);
+cds = combine(imds,bxds);
+
+% Configure training options.
+options = trainingOptions('sgdm', ...
+      'InitialLearnRate', 0.001, ...
+      'Verbose',true, ...
+      'MiniBatchSize',1, ...
+      'MaxEpochs',30, ...
+      'Shuffle','every-epoch', ...
+      'VerboseFrequency',10);
+[yoloDetector,info] = trainYOLOv2ObjectDetector(cds,lgraph,options);
+save('yoloDetector','yoloDetector')
+% test the detector on new images
+I = imread('_Frame 2 FLAT Rng -0.22621787 2.558681 Loc r 16812.974 c -20153.975.tiff.tiff_.tiff');
+I = imresize(I,inputSize(1:2));
+[bboxes,scores] = detect(yoloDetector,I);
+% display the results
+I = insertObjectAnnotation(I,'rectangle',bboxes,scores);
+figure
+imshow(I)
+   detectionResults = detect(yoloDetector,I); 
+
+
+% Appendix L.  Script for the FasterRCNN
+
+% introduce the groundtruth and create image datastore
+[imds,bxds] = objectDetectorTrainingData(gTruth);
+rng(0)
+shuffledIndices = randperm(height(gTruth.LabelData));
+x = height(gTruth.DataSource.Source);
+idx = round(0.6 * x);
+
+% assign images for training, validating, and testing
+trainingIdx = 1:idx;
+trainingDataTbl = gTruth.DataSource.Source(shuffledIndices(trainingIdx),:);
+trainingLabelData = gTruth.LabelData(shuffledIndices(trainingIdx),:);
+validationIdx = idx+1 : idx + 1 + floor(0.1 * length(shuffledIndices) );
+validationDataTbl = gTruth.DataSource.Source(shuffledIndices(validationIdx),:);
+validationLabelData =  gTruth.LabelData(shuffledIndices(validationIdx),:);
+testIdx = validationIdx(end)+1 : length(shuffledIndices);
+testDataTbl =  gTruth.DataSource.Source(shuffledIndices(testIdx),:);
+testLabelData =  gTruth.LabelData(shuffledIndices(testIdx),:);
+
+% Create an image datastore and box label datastore using the ground truth object.
+imdsTrain = imageDatastore(trainingDataTbl,"LabelSource","foldernames");
+bldsTrain = boxLabelDatastore(trainingLabelData(:,'dna'));
+imdsValidation = imageDatastore(validationDataTbl,"LabelSource","foldernames");
+bldsValidation = boxLabelDatastore(validationLabelData(:,'dna'));
+imdsTest = imageDatastore(testDataTbl,"LabelSource","foldernames");
+bldsTest = boxLabelDatastore(testLabelData (:,'dna'));
+trainingData = combine(imdsTrain,bldsTrain);
+validationData = combine(imdsValidation,bldsValidation);
+testData = combine(imdsTest,bldsTest);
+
+% Load the detector containing the layerGraph object for training.
+net = resnet50;
+inputImageSize = [1000 1000 3];
+numClasses = 1;
+featureLayer = 'activation_40_relu';
+numAnchors = 5;
+anchorBoxes = estimateAnchorBoxes(bxds,numAnchors);
+lgraph = fasterRCNNLayers(inputImageSize,numClasses,anchorBoxes, ...
+                         net,featureLayer);
+options = trainingOptions('sgdm',...
+   'MaxEpochs',10,...
+   'MiniBatchSize',1,...
+   'InitialLearnRate',1e-5,'ExecutionEnvironment','cpu',...
+   'CheckpointPath',tempdir,...
+   'ValidationData',validationData);
+ [ResNetRCNNdetector, info] = trainFasterRCNNObjectDetector(trainingData,lgraph,options);
+       %'NegativeOverlapRange',[0 0.3], ...
+       %'PositiveOverlapRange',[0.6 1]);
+      
+   save('ResNetRCNNdetector','ResNetRCNNdetector')
+imds = imageDatastore(testDataTbl);
+[bboxes,scores] = detect(ResNetRCNNdetector,I);
+% display the results
+I = insertObjectAnnotation(I,'rectangle',bboxes,scores);
+figure
+imshow(I)
